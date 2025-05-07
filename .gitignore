@@ -71,6 +71,7 @@ htmlcov/
 /api/
 /llm/
 /schemas/
+/scripts/
 /config.py
 /.env
 /secrets/

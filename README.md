@@ -5,7 +5,7 @@ A community-driven registry of security evaluations for Model Context Protocol (
 
 ## About This Project
 
-The MCP Security Registry provides standardized security evaluations of MCP server implementations to help developers and organizations make informed decisions about which MCP servers to use in their applications.
+The MCP Security Registry provides standardized security evaluations of MCP server implementations to help developers and organizations make informed decisions about which MCP servers to use in their applications. Our approach uses LLM-based analysis to provide comprehensive security assessments with actionable recommendations.
 
 ### What is MCP?
 
@@ -15,14 +15,15 @@ The Model Context Protocol (MCP) standardizes how applications provide context t
 
 MCP servers often handle sensitive information and provide critical functionality for AI applications. Security vulnerabilities in MCP implementations can lead to data breaches, prompt injection attacks, and other security issues.
 
-## Security Profiles
+## Certification Process
 
-Browse security profiles by category:
+Our certification process is designed to be transparent, thorough, and actionable:
 
-- [Memory](profiles/memory/)
-- [Retrieval](profiles/retrieval/)
-- [Tool](profiles/tool/)
-- [General Purpose](profiles/general/)
+1. **Repository Submission**: Developers submit their MCP server repository for evaluation
+2. **LLM-Based Analysis**: Our system analyzes the repository using advanced LLM techniques
+3. **Security Profile Generation**: A comprehensive security profile is created
+4. **Certification Assignment**: The implementation receives a certification level based on its security posture
+5. **Private Results Delivery**: Detailed results are delivered privately to the repository owner
 
 ## Certification Levels
 
@@ -32,38 +33,28 @@ MCP implementations can receive one of three certification levels:
 - **Silver**: Implements recommended security practices
 - **Gold**: Follows security best practices with no critical/high vulnerabilities
 
-See our [Evaluation Criteria](evaluation-criteria.md) for detailed information on certification requirements.
+See our [Evaluation Criteria](evaluation-criterea.md) for detailed information on certification requirements.
 
-## Using This Registry
+## Request a Certification
 
-### For Developers
+To request a security evaluation for your MCP server implementation:
 
-If you're building an application that uses an MCP server:
+1. Ensure your repository is publicly accessible on GitHub
+2. Submit your repository URL through our [certification request form](https://example.com/request-certification)
+3. Receive detailed security analysis and certification results via email
+4. Address any security issues identified
+5. Request a re-evaluation to achieve a higher certification level (optional)
 
-1. Browse the profiles to find implementations that meet your security requirements
-2. Review the deployment recommendations for secure integration
-3. Check the certification level and security scores
+## Security Evaluation Template
 
-### For MCP Server Maintainers
-
-If you maintain an MCP server implementation:
-
-1. Review the evaluation criteria to understand security requirements
-2. Self-assess your implementation using our tools
-3. Address any security issues identified
-4. Request an official evaluation by submitting an issue
+Our security evaluations follow a standardized template to ensure comprehensive coverage of all security aspects. You can view the [evaluation template](evaluation-template.md) to understand what aspects of your implementation will be assessed.
 
 ## Contributing
 
-We welcome contributions from the community! See our [Contributing Guidelines](CONTRIBUTING.md) for information on how to contribute security evaluations and other improvements.
-
-## Tools
-
-This repository includes tools to help with security evaluations:
-
-- [MCP Security Scanner](tools/mcp_security_scanner.py): Automated security scanner for MCP implementations
-- [Profile Generator](tools/profile_generator.py): Generates profile templates from scan results
+We welcome contributions from the community! See our [Contributing Guidelines](CONTRIBUTING.md) for information on how to contribute to the MCP Security Registry project.
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+```
+

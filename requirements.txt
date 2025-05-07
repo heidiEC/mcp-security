@@ -1,5 +1,22 @@
-streamlit==1.24.0
-pandas==2.0.3
-gitpython==3.1.31
-packaging==23.1
-pyyaml==6.0
+# Core dependencies
+pymongo==4.5.0
+gitpython==3.1.40
+requests==2.31.0
+markdown==3.5
+python-dotenv==1.0.0
+# bson==0.5.10  # This causes conflicts with pymongo's bson module
+
+# For Ollama integration
+ollama==0.1.5  # Python client for Ollama
+
+# For API server
+flask==2.3.3
+redis==5.0.1
+rq==1.15.1
+
+# For testing
+pytest==7.4.3
+pytest-mock==3.12.0
+
+# For MongoDB connection
+dnspython==2.4.2  # Required for MongoDB Atlas connection strings

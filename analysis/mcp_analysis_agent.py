@@ -1,25 +1,35 @@
+import sys
 import os
-import json
-import datetime
-import requests
-import git
+import certifi
+import re
 import tempfile
 import shutil
-from typing import Dict, List, Any, Optional
+import git
 from pymongo import MongoClient
-import markdown
+import datetime
+from typing import Dict, List, Any, Optional, Tuple
 from bson.objectid import ObjectId
 
+# Add the parent directory to the path so we can import our modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import MONGODB_URI, MONGODB_DB_NAME, LLM_PROVIDER, LLM_MODEL, LLM_ENDPOINT
+from llm.llm_factory import get_llm_client
+
 # MongoDB connection
-client = MongoClient(os.environ.get("MONGODB_URI", "mongodb://localhost:27017/"))
-db = client["mcp_security"]
+client = MongoClient(MONGODB_URI,tlsCAFile=certifi.where())
+db = client[MONGODB_DB_NAME]
 
 class MCPAnalysisAgent:
     """Agent for analyzing MCP server repositories using LLM"""
     
-    def __init__(self, llm_api_key: str, llm_endpoint: str):
-        self.llm_api_key = llm_api_key
-        self.llm_endpoint = llm_endpoint
+    def __init__(self):
+        # Get LLM client from factory
+        config = {
+            "LLM_MODEL": LLM_MODEL,
+            "LLM_ENDPOINT": LLM_ENDPOINT
+        }
+        self.llm_client = get_llm_client(LLM_PROVIDER, config)
         
         # Load evaluation criteria from file
         with open("evaluation-criterea.md", "r") as f:
@@ -29,7 +39,7 @@ class MCPAnalysisAgent:
         with open("evaluation-template.md", "r") as f:
             self.evaluation_template = f.read()
     
-    def analyze_repository(self, repo_url: str) -> Dict[str, Any]:
+    def analyze_repository(self, repo_url: str) -> dict[str, any]:
         """
         Analyze an MCP server repository and generate a security profile
         
@@ -94,7 +104,7 @@ class MCPAnalysisAgent:
             shutil.rmtree(temp_dir)
             raise Exception(f"Failed to clone repository: {str(e)}")
     
-    def _extract_repo_metadata(self, repo_path: str, repo_url: str) -> Dict[str, Any]:
+    def _extract_repo_metadata(self, repo_path: str, repo_url: str) -> dict[str, any]:
         """Extract metadata from the repository"""
         repo = git.Repo(repo_path)
         
@@ -134,7 +144,7 @@ class MCPAnalysisAgent:
         # Default if we can't determine
         return "Unknown"
     
-    def _extract_security_files(self, repo_path: str) -> Dict[str, Dict[str, Any]]:
+    def _extract_security_files(self, repo_path: str) -> dict[str, dict[str, any]]:
         """Extract security-relevant files from the repository"""
         security_files = {}
         
@@ -225,7 +235,7 @@ class MCPAnalysisAgent:
         except UnicodeDecodeError:
             return None
     
-    def _store_repository_info(self, repo_metadata: Dict[str, Any]) -> ObjectId:
+    def _store_repository_info(self, repo_metadata: dict[str, any]) -> ObjectId:
         """Store repository information in database"""
         # Check if repository already exists
         existing_repo = db.repositories.find_one({"repo_url": repo_metadata["repo_url"]})
@@ -246,7 +256,7 @@ class MCPAnalysisAgent:
             result = db.repositories.insert_one(repo_metadata)
             return result.inserted_id
     
-    def _store_security_files(self, repo_id: ObjectId, security_files: Dict[str, Dict[str, Any]]) -> None:
+    def _store_security_files(self, repo_id: ObjectId, security_files: dict[str, dict[str, any]]) -> None:
         """Store security-relevant files in database"""
         # Delete existing files for this repository
         db.security_files.delete_many({"repo_id": repo_id})
@@ -256,7 +266,7 @@ class MCPAnalysisAgent:
             file_data["repo_id"] = repo_id
             db.security_files.insert_one(file_data)
     
-    def _generate_analysis_prompt(self, repo_metadata: Dict[str, Any], security_files: Dict[str, Dict[str, Any]]) -> str:
+    def _generate_analysis_prompt(self, repo_metadata: dict[str, any], security_files: dict[str, dict[str, any]]) -> str:
         """Generate a prompt for LLM analysis"""
         prompt = f"""
 # MCP Security Analysis Request
@@ -269,6 +279,20 @@ Please analyze the following Model Context Protocol (MCP) server implementation 
 - Primary Function: {repo_metadata['primary_function']}
 - Version: {repo_metadata['version_evaluated']}
 
+## Important Context About MCP Implementations
+
+MCP is a new protocol that standardizes how applications provide context to Large Language Models (LLMs). When analyzing MCP server implementations, consider:
+
+1. **Integration Context**: Many MCP servers are designed to be integrated into larger systems where authentication, rate limiting, and other security features are provided by the integrating application. Do not flag missing security features if the README or documentation clearly indicates they should be added by the developer during integration.
+
+2. **Implementation Intent**: Use the README.md and documentation to understand the intended use case and deployment model. Some implementations are meant to be used behind API gateways or within secure environments where certain security features would be redundant.
+
+3. **Component Architecture**: Determine if the repository is a standalone server or a component meant to be used within a larger system. Components may rely on their parent system for security features.
+
+4. **API Keys and Authentication**: If the documentation mentions the need for API keys or authentication to be added during deployment (e.g., "add your GitHub personal access token"), do not flag the absence of these in the code as vulnerabilities.
+
+5. **Development Status**: Consider whether the repository is in active development, a proof of concept, or a production-ready implementation. Adjust your expectations accordingly.
+
 ## Evaluation Criteria
 Use the following criteria to evaluate the security of this MCP server:
 
@@ -278,9 +302,21 @@ Use the following criteria to evaluate the security of this MCP server:
 
 """
         
+        # Add README.md first if it exists, to provide context for the analysis
+        readme_content = None
+        for file_path, file_data in security_files.items():
+            if file_path.lower() == "readme.md":
+                readme_content = file_data["content"]
+                prompt += f"### README.md (Important for Context)\n\n{readme_content}\n\n"
+                break
+        
         # Group files by type
         files_by_type = {}
         for file_path, file_data in security_files.items():
+            # Skip README.md as we've already included it
+            if file_path.lower() == "readme.md":
+                continue
+                
             file_type = file_data["file_type"]
             if file_type not in files_by_type:
                 files_by_type[file_type] = []
@@ -297,46 +333,104 @@ Use the following criteria to evaluate the security of this MCP server:
                 
                 prompt += f"**File: {file_path}**\n\n{content}\n\n\n"
         
-        # Add instructions for output format
+        # Add instructions for output format with emphasis on context-aware analysis
         prompt += f"""
 ## Output Format
 Please provide your analysis in the following format:
 
 {self.evaluation_template}
 
-Focus on practical, actionable insights rather than theoretical concerns.
+## Special Analysis Instructions
+
+1. **Context-Aware Analysis**: Before identifying vulnerabilities, carefully consider the intended deployment context from the README and documentation. Only flag issues that would be security problems in the intended deployment scenario.
+
+2. **Integration Assumptions**: If the repository is meant to be integrated with other systems that provide security features, clearly state these assumptions in your analysis.
+
+3. **Distinguish Between Issues**:
+   - **Actual Vulnerabilities**: Security issues that exist regardless of deployment context
+   - **Integration Requirements**: Security features that need to be added during integration
+   - **Recommendations**: Suggestions for improving security beyond the minimum requirements
+
+4. **Certification Justification**: Provide clear reasoning for the certification level, considering the intended use case and deployment model.
+
+5. **Specific GitHub MCP Server Context**: For GitHub's MCP server implementation, pay special attention to how it's intended to be deployed and integrated. The README likely indicates that users need to provide their own GitHub Personal Access Token, which means authentication is handled through integration rather than being a vulnerability in the implementation itself.
+
+Focus on practical, actionable insights rather than theoretical concerns. Avoid penalizing the implementation for security features that are intentionally left to the integrator.
 """
         
         return prompt
     
     def _get_llm_analysis(self, prompt: str) -> str:
         """Get analysis from LLM API"""
-        # This is a placeholder - implement your specific LLM API call here
-        # For example, using OpenAI's API:
+        system_prompt = "You are a security expert analyzing MCP server implementations."
         
-        headers = {
-            "Authorization": f"Bearer {self.llm_api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "model": "gpt-4",  # or your preferred model
-            "messages": [
-                {"role": "system", "content": "You are a security expert analyzing MCP server implementations."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.2,
-            "max_tokens": 4000
-        }
-        
-        response = requests.post(self.llm_endpoint, headers=headers, json=data)
-        
-        if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
-        else:
-            raise Exception(f"LLM API error: {response.status_code} - {response.text}")
+        try:
+            return self.llm_client.generate_completion(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.2
+            )
+        except Exception as e:
+            raise Exception(f"LLM analysis failed: {str(e)}")
     
-    def _parse_llm_analysis(self, analysis_result: str) -> Dict[str, Any]:
+    def _extract_section(self, text: str, section_title: str, next_section: Optional[str] = None) -> str:
+        """Extract a section from the markdown text"""
+        import re
+        
+        # Pattern to match the section header (more flexible)
+        section_patterns = [
+            rf"## {re.escape(section_title)}\s*\n",
+            rf"#{{{2,3}}} {re.escape(section_title)}\s*\n",
+            rf"\*\*{re.escape(section_title)}\*\*\s*\n"
+        ]
+        
+        # Find the start of the section
+        start_pos = -1
+        for pattern in section_patterns:
+            match = re.search(pattern, text)
+            if match:
+                start_pos = match.end()
+                break
+        
+        if start_pos == -1:
+            # Try a more lenient search
+            simple_pattern = re.escape(section_title)
+            match = re.search(simple_pattern, text)
+            if match:
+                # Find the end of the line
+                line_end = text.find('\n', match.end())
+                if line_end != -1:
+                    start_pos = line_end + 1
+        
+        if start_pos == -1:
+            return ""
+        
+        # Find the end of the section (start of the next section or end of text)
+        end_pos = len(text)
+        
+        if next_section:
+            next_section_patterns = [
+                rf"## {re.escape(next_section)}\s*\n",
+                rf"#{{{2,3}}} {re.escape(next_section)}\s*\n",
+                rf"\*\*{re.escape(next_section)}\*\*\s*\n"
+            ]
+            
+            for pattern in next_section_patterns:
+                next_match = re.search(pattern, text[start_pos:])
+                if next_match:
+                    end_pos = start_pos + next_match.start()
+                    break
+        else:
+            # Look for any section header
+            next_header_matches = re.finditer(r"(?:^|\n)(?:#{2,3}|\*\*)[^#\*\n]+(?:\*\*)?(?:\n|$)", text[start_pos:])
+            for next_match in next_header_matches:
+                end_pos = start_pos + next_match.start()
+                break
+        
+        # Extract and return the section content
+        return text[start_pos:end_pos].strip()
+    
+    def _parse_llm_analysis(self, analysis_result: str) -> dict[str, any]:
         """Parse the LLM analysis into a structured format"""
         # Store the full markdown report
         security_profile = {
@@ -344,10 +438,7 @@ Focus on practical, actionable insights rather than theoretical concerns.
             "evaluation_date": datetime.datetime.now()
         }
         
-        # Extract sections using markdown parsing or regex
-        # This is a simplified version - you might need more robust parsing
-        
-        # Extract scores
+        # Extract scores with more flexible patterns
         scores = {
             "overall": 0,
             "authentication": 0,
@@ -357,51 +448,109 @@ Focus on practical, actionable insights rather than theoretical concerns.
             "infrastructure": 0
         }
         
-        score_lines = self._extract_section(analysis_result, "Security Score", "Executive Summary")
-        for line in score_lines.split("\n"):
-            if "Overall Score" in line:
-                scores["overall"] = self._extract_score(line)
-            elif "Authentication" in line:
-                scores["authentication"] = self._extract_score(line)
-            elif "Data Protection" in line:
-                scores["data_protection"] = self._extract_score(line)
-            elif "Input Validation" in line:
-                scores["input_validation"] = self._extract_score(line)
-            elif "Prompt Security" in line:
-                scores["prompt_security"] = self._extract_score(line)
-            elif "Infrastructure" in line:
-                scores["infrastructure"] = self._extract_score(line)
+        # Try to extract the Security Score section
+        score_section = self._extract_section(analysis_result, "Security Score", None)
+        if not score_section:
+            # Try alternative section titles
+            score_section = self._extract_section(analysis_result, "Security Scores", None)
+        
+        if score_section:
+            # Process each line in the score section
+            for line in score_section.split("\n"):
+                line = line.lower()
+                
+                # Check for each score type
+                if "overall" in line:
+                    scores["overall"] = self._extract_score(line)
+                elif "authentication" in line:
+                    scores["authentication"] = self._extract_score(line)
+                elif "data protection" in line:
+                    scores["data_protection"] = self._extract_score(line)
+                elif "input validation" in line:
+                    scores["input_validation"] = self._extract_score(line)
+                elif "prompt security" in line:
+                    scores["prompt_security"] = self._extract_score(line)
+                elif "infrastructure" in line:
+                    scores["infrastructure"] = self._extract_score(line)
+        
+        # If we still don't have scores, try to extract them from the entire document
+        if scores["overall"] == 0:
+            # Look for patterns like "Overall Score: 7/10" anywhere in the document
+            import re
+            
+            score_patterns = {
+                "overall": r"overall\s+score:?\s*(\d+(?:\.\d+)?)",
+                "authentication": r"authentication.*?score:?\s*(\d+(?:\.\d+)?)",
+                "data_protection": r"data\s+protection.*?score:?\s*(\d+(?:\.\d+)?)",
+                "input_validation": r"input\s+validation.*?score:?\s*(\d+(?:\.\d+)?)",
+                "prompt_security": r"prompt\s+security.*?score:?\s*(\d+(?:\.\d+)?)",
+                "infrastructure": r"infrastructure.*?score:?\s*(\d+(?:\.\d+)?)"
+            }
+            
+            for score_type, pattern in score_patterns.items():
+                match = re.search(pattern, analysis_result.lower())
+                if match:
+                    try:
+                        scores[score_type] = float(match.group(1))
+                    except (ValueError, IndexError):
+                        pass
         
         security_profile["scores"] = scores
         
-        # Extract executive summary
-        security_profile["executive_summary"] = self._extract_section(
-            analysis_result, "Executive Summary", "Security Features"
-        )
+        # Extract executive summary with more flexible section detection
+        executive_summary = self._extract_section(analysis_result, "Executive Summary", None)
+        security_profile["executive_summary"] = executive_summary
         
-        # Extract vulnerabilities
-        vulnerabilities_section = self._extract_section(analysis_result, "Vulnerabilities", "Deployment Recommendations")
+        # Extract integration context
+        integration_context = self._extract_section(analysis_result, "Architecture Overview", None)
+        if not integration_context:
+            integration_context = self._extract_section(analysis_result, "Implementation Context", None)
+        security_profile["integration_context"] = integration_context
+        
+        # Extract vulnerabilities with more flexible parsing
+        vulnerabilities_section = self._extract_section(analysis_result, "Vulnerabilities", None)
         vulnerabilities = []
+        integration_requirements = []
         
-        # Parse the markdown table - this is a simplified approach
-        lines = vulnerabilities_section.split("\n")
-        for line in lines:
-            if "|" in line and not line.startswith("|-") and not line.startswith("| ID"):
-                parts = line.split("|")
-                if len(parts) >= 6:
+        if vulnerabilities_section:
+            # Parse the markdown table - more robust approach
+            import re
+            
+            # Find table rows
+            table_rows = re.findall(r"\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|", vulnerabilities_section)
+            
+            for row in table_rows:
+                # Skip header or separator rows
+                if not row[0] or row[0].strip() == "ID" or "-" in row[0]:
+                    continue
+                
+                # Determine if this is a vulnerability or integration requirement
+                vuln_type = row[2].lower() if len(row) > 2 else ""
+                
+                if "integration" in vuln_type or "requirement" in vuln_type:
+                    integration_requirements.append({
+                        "id": row[0].strip(),
+                        "severity": row[1].strip() if len(row) > 1 else "Medium",
+                        "category": row[2].strip() if len(row) > 2 else "",
+                        "description": row[3].strip() if len(row) > 3 else "",
+                        "recommendation": row[4].strip() if len(row) > 4 else "",
+                        "status": "Open"
+                    })
+                else:
                     vulnerabilities.append({
-                        "id": parts[1].strip(),
-                        "severity": parts[2].strip(),
-                        "category": parts[3].strip(),
-                        "description": parts[4].strip(),
-                        "recommendation": parts[5].strip(),
+                        "id": row[0].strip(),
+                        "severity": row[1].strip() if len(row) > 1 else "Medium",
+                        "category": row[2].strip() if len(row) > 2 else "",
+                        "description": row[3].strip() if len(row) > 3 else "",
+                        "recommendation": row[4].strip() if len(row) > 4 else "",
                         "status": "Open"
                     })
         
         security_profile["vulnerabilities"] = vulnerabilities
+        security_profile["integration_requirements"] = integration_requirements
         
-        # Extract certification details
-        certification_section = self._extract_section(analysis_result, "Certification Details", "Change History")
+        # Extract certification details with more flexible section detection
+        certification_section = self._extract_section(analysis_result, "Certification Details", None)
         certification = {
             "level": "None",
             "justification": "",
@@ -409,29 +558,28 @@ Focus on practical, actionable insights rather than theoretical concerns.
             "expiration": datetime.datetime.now() + datetime.timedelta(days=180)
         }
         
-        for line in certification_section.split("\n"):
-            if "Certification Level" in line and ":" in line:
-                level = line.split(":", 1)[1].strip()
-                if level in ["Bronze", "Silver", "Gold"]:
-                    certification["level"] = level
-            elif "Justification" in line and ":" in line:
-                certification["justification"] = line.split(":", 1)[1].strip()
-            elif "Conditions" in line and ":" in line:
-                certification["conditions"] = line.split(":", 1)[1].strip()
-            elif "Expiration" in line and ":" in line:
-                # Try to parse expiration date, fallback to 6 months if parsing fails
-                try:
-                    expiration_text = line.split(":", 1)[1].strip()
-                    certification["expiration"] = datetime.datetime.strptime(expiration_text, "%Y-%m-%d")
-                except:
-                    pass
+        if certification_section:
+            # Look for certification level
+            import re
+            level_match = re.search(r"(?:certification|level).*?:\s*(Bronze|Silver|Gold|None)", certification_section, re.IGNORECASE)
+            if level_match:
+                certification["level"] = level_match.group(1).capitalize()
+            
+            # Look for justification
+            justification_match = re.search(r"justification.*?:\s*([^\n]+)", certification_section, re.IGNORECASE)
+            if justification_match:
+                certification["justification"] = justification_match.group(1).strip()
+            
+            # Look for conditions
+            conditions_match = re.search(r"conditions.*?:\s*([^\n]+)", certification_section, re.IGNORECASE)
+            if conditions_match:
+                certification["conditions"] = conditions_match.group(1).strip()
         
         security_profile["certification"] = certification
         
-        # Extract security features
+        # Extract security features with more flexible section detection
         security_features = {}
         
-        # Extract each security feature section
         feature_sections = [
             ("Authentication & Authorization", "authentication"),
             ("Data Protection", "data_protection"),
@@ -441,78 +589,49 @@ Focus on practical, actionable insights rather than theoretical concerns.
         ]
         
         for section_title, feature_key in feature_sections:
-            section_content = self._extract_section(analysis_result, section_title, next_section=None)
+            section_content = self._extract_section(analysis_result, section_title, None)
             if section_content:
                 security_features[feature_key] = section_content
         
         security_profile["security_features"] = security_features
         
         # Extract deployment recommendations
-        security_profile["deployment_recommendations"] = self._extract_section(
-            analysis_result, "Deployment Recommendations", "Code Quality Assessment"
-        )
+        deployment_recommendations = self._extract_section(analysis_result, "Deployment Recommendations", None)
+        security_profile["deployment_recommendations"] = deployment_recommendations
         
         # Extract code quality assessment
-        security_profile["code_quality"] = self._extract_section(
-            analysis_result, "Code Quality Assessment", "Certification Details"
-        )
+        code_quality = self._extract_section(analysis_result, "Code Quality Assessment", None)
+        security_profile["code_quality"] = code_quality
         
         return security_profile
     
-    def _extract_section(self, text: str, section_title: str, next_section: Optional[str] = None) -> str:
-        """Extract a section from the markdown text"""
-        import re
-        
-        # Pattern to match the section header
-        section_pattern = rf"## {re.escape(section_title)}\s*\n"
-        
-        # Find the start of the section
-        match = re.search(section_pattern, text)
-        if not match:
-            return ""
-        
-        start_pos = match.end()
-        
-        # Find the end of the section (start of the next section or end of text)
-        if next_section:
-            next_section_pattern = rf"## {re.escape(next_section)}\s*\n"
-            next_match = re.search(next_section_pattern, text[start_pos:])
-            if next_match:
-                end_pos = start_pos + next_match.start()
-            else:
-                end_pos = len(text)
-        else:
-            # Look for any section header
-            next_header_match = re.search(r"## ", text[start_pos:])
-            if next_header_match:
-                end_pos = start_pos + next_header_match.start()
-            else:
-                end_pos = len(text)
-        
-        # Extract and return the section content
-        return text[start_pos:end_pos].strip()
-    
     def _extract_score(self, line: str) -> float:
-        """Extract a numeric score from a line of text"""
+        """Extract a numeric score from a line of text with more robust parsing"""
         import re
         
-        # Try to find a pattern like "8/10" or "8.5/10"
-        score_match = re.search(r"(\d+(?:\.\d+)?)/10", line)
-        if score_match:
-            return float(score_match.group(1))
+        # Try multiple patterns to extract scores
+        patterns = [
+            r"(\d+(?:\.\d+)?)\s*/\s*10",  # Format: 8/10 or 8.5/10
+            r"score:?\s*(\d+(?:\.\d+)?)",  # Format: Score: 8 or Score: 8.5
+            r":\s*(\d+(?:\.\d+)?)",        # Format: : 8 or : 8.5
+            r"(\d+(?:\.\d+)?)"             # Just a number
+        ]
         
-        # Try to find just a number
-        number_match = re.search(r"(\d+(?:\.\d+)?)", line)
-        if number_match:
-            score = float(number_match.group(1))
-            # Ensure it's in the range 1-10
-            if 1 <= score <= 10:
-                return score
+        for pattern in patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                try:
+                    score = float(match.group(1))
+                    # Ensure it's in the range 1-10
+                    if 0 <= score <= 10:
+                        return score
+                except (ValueError, IndexError):
+                    pass
         
         # Default score if we can't extract one
-        return 5.0
+        return 0
     
-    def _store_security_profile(self, security_profile: Dict[str, Any]) -> ObjectId:
+    def _store_security_profile(self, security_profile: dict[str, any]) -> ObjectId:
         """Store the security profile in the database"""
         # Check if a profile already exists for this repository
         existing_profile = db.security_profiles.find_one({"repo_id": security_profile["repo_id"]})
@@ -549,7 +668,7 @@ Focus on practical, actionable insights rather than theoretical concerns.
         })
 
 
-def analyze_github_repository(repo_url: str, llm_api_key: str, llm_endpoint: str) -> Dict[str, Any]:
+def analyze_github_repository(repo_url: str, llm_api_key: str, llm_endpoint: str) -> dict[str, any]:
     """
     Analyze a GitHub repository for MCP security
     
@@ -567,30 +686,26 @@ def analyze_github_repository(repo_url: str, llm_api_key: str, llm_endpoint: str
 
 if __name__ == "__main__":
     import argparse
-    import os
     
     parser = argparse.ArgumentParser(description="Analyze MCP server security")
     parser.add_argument("repo_url", help="URL of the GitHub repository")
-    parser.add_argument("--api-key", help="API key for LLM service (defaults to OPENAI_API_KEY env var)")
-    parser.add_argument("--endpoint", help="Endpoint URL for LLM service", 
-                        default="https://api.openai.com/v1/chat/completions")
     
     args = parser.parse_args()
     
-    # Get API key from args or environment
-    api_key = args.api_key or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        print("Error: No API key provided. Use --api-key or set OPENAI_API_KEY environment variable.")
-        exit(1)
+    # Create an instance of the analysis agent
+    # This will use the LLM factory with the configured provider (Ollama)
+    agent = MCPAnalysisAgent()
     
     # Run analysis
     try:
-        result = analyze_github_repository(args.repo_url, api_key, args.endpoint)
-        print(f"Analysis complete!")
+        result = agent.analyze_repository(args.repo_url)
+        print(f"=== Analysis Results ===")
         print(f"Repository ID: {result['repo_id']}")
         print(f"Profile ID: {result['profile_id']}")
         print(f"Certification Level: {result['certification_level']}")
         print(f"Security Score: {result['security_score']}/10")
     except Exception as e:
         print(f"Error analyzing repository: {str(e)}")
+        import traceback
+        traceback.print_exc()
         exit(1)

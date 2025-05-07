@@ -65,3 +65,16 @@ reports/
 .coverage
 htmlcov/
 .pytest_cache/
+
+#private
+/analysis/
+/api/
+/llm/
+/schemas/
+/config.py
+/.env
+/secrets/
+/__pycache__/
+*.pyc
+*.pyo
+*mongo*
